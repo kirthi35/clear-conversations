@@ -1,4 +1,4 @@
 interface:
   display_name: "Clear Conversations"
   short_description: "Review conversations for clearer explanations"
-  default_prompt: "Use $clear-conversations to review my latest retained sessions and suggest evidence-supported communication improvements."
+  default_prompt: "Use $clear-conversations."

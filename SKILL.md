@@ -13,6 +13,15 @@ Use Claude Code or Codex with local file access and Python 3.10 or later.
 
 ## Select the requested task
 
+Bare `/clear-conversations` in Claude Code or `$clear-conversations` in Codex starts the retained-session review automatically.
+No additional prompt or source selection is required.
+Review the latest 10 available retained root sessions across both sources, within the collector's discovery limits.
+If one source is unavailable, proceed with the available source and disclose the missing source.
+If both sources are unavailable, explain the access limit and give the next useful collection step.
+Read complete relevant exchanges. Return supported findings, a proposed rewrite, and a small proposed instruction when evidence supports them.
+Do not ask the user to choose a mode, date range, or source before starting the default review.
+Honor an explicit narrower scope when the user supplies one.
+
 For a current-explanation review or rewrite, use the supplied exchange first.
 Do not scan retained sessions unless the request or a necessary evidence gap requires them.
 For a user-selected session file, read that file directly. Inventory is optional.
@@ -127,8 +136,13 @@ Use more words only when material evidence or uncertainty requires them.
 ## Change accepted instructions
 
 A review does not authorize edits to `CLAUDE.md`, `AGENTS.md`, memory, or other configuration.
+If no edit is authorized, show the exact proposed wording before asking whether to save a supported rule.
+Identify the target file and its scope. Inspect that file before presenting a proposed diff.
+If no target is established, identify it as unresolved instead of inventing an existing instruction file.
+Do not ask the user to approve an unspecified instruction change.
 When the user explicitly requests an instruction update, inspect the target and propose the smallest relevant change.
 Use the user's already accepted wording and scope when available.
+Do not request permission again for a specific edit that the user already authorized.
 If the target or accepted wording is materially unclear, resolve that uncertainty before editing.
 Preserve unrelated instructions. Show the resulting diff and identify the affected host and scope.
 Do not publish, commit, or push an instruction update without authorization for that action.
