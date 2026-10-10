@@ -1,0 +1,15 @@
+# Local evidence must never become repository content.
+reports/
+audit-reports/
+raw-extracts/
+session-extracts/
+local-evidence/
+*.jsonl
+!examples/synthetic-session.jsonl
+!tests/fixtures/*.jsonl
+*.local.json
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+.venv/

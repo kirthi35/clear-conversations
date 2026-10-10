@@ -1,0 +1,8 @@
+{"type":"user","message":{"role":"user","content":"Why does the task status change only after I reload the page?"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The materialized projection requires client reconciliation after the asynchronous lifecycle transition."}]}}
+{"type":"user","message":{"role":"user","content":"I don't understand which part needs the reload. Explain what the browser does."}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The worker saves the new task status. The browser receives no live update. Reloading makes the browser request the saved status."}]}}
+{"type":"user","message":{"role":"user","content":"So the worker saves it, but the browser only reads the saved status when I reload. That explains the delay."}}
+{"type":"user","message":{"role":"user","content":"What would a live update change?"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"A live update is a message that the server sends when the status changes. The browser would use that message to update the page."}]}}
+{"type":"user","message":{"role":"user","content":"The browser would receive the new status without another reload. I understand the proposed behavior."}}
