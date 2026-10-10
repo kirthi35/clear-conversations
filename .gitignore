@@ -6,6 +6,7 @@ session-extracts/
 local-evidence/
 *.jsonl
 !examples/synthetic-session.jsonl
+!examples/synthetic-session-2.jsonl
 !tests/fixtures/*.jsonl
 *.local.json
 __pycache__/

@@ -5,7 +5,9 @@ Schemas are deliberately explicit. Unknown records create gaps; transcript conte
 is data, never instructions. Limits bound traversal, input, and serialized output.
 """
 import argparse
+import calendar
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -34,6 +36,55 @@ WRAPPERS = ("system-reminder", "environment_context", "developer_instructions",
 
 def encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def utc_now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def parse_timestamp(value):
+    """Source timestamps without an explicit offset remain unknown."""
+    if not isinstance(value, str):
+        return None
+    try:
+        timestamp = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            return None
+        return timestamp.astimezone(dt.timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+
+
+def window_endpoint(value, end=False):
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        date = dt.date.fromisoformat(value)
+        return dt.datetime.combine(date, dt.time.max if end else dt.time.min, dt.timezone.utc)
+    timestamp = parse_timestamp(value)
+    if timestamp is None:
+        raise ValueError("window timestamps require an explicit UTC offset")
+    return timestamp
+
+
+def three_months_before(value):
+    year, month_index = divmod(value.year * 12 + value.month - 1 - 3, 12)
+    month = month_index + 1
+    return value.replace(year=year, month=month, day=min(value.day, calendar.monthrange(year, month)[1]))
+
+
+def frozen_window(since=None, until=None):
+    end = window_endpoint(until, end=True) if until else utc_now()
+    start = window_endpoint(since) if since else three_months_before(end)
+    if start > end:
+        raise ValueError("since must not be after until")
+    return {"start": start.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+            "end": end.isoformat(timespec="microseconds").replace("+00:00", "Z"), "inclusive": True}
+
+
+def membership(timestamp, window):
+    observed = parse_timestamp(timestamp)
+    if observed is None:
+        return "unknown"
+    return "in_window" if parse_timestamp(window["start"]) <= observed <= parse_timestamp(window["end"]) else "outside_window"
 
 
 def redact(text):
@@ -165,7 +216,8 @@ def discover(root, source, max_files, max_entries, counts, diagnostics):
                         if counts["files"] >= max_files:
                             break
                         counts["files"] += 1
-                        found.append((entry.stat(follow_symlinks=False).st_mtime_ns, Path(entry.path), source))
+                        info = entry.stat(follow_symlinks=False)
+                        found.append((info.st_mtime_ns, Path(entry.path), source, info.st_size))
             pending.extend(reversed(children))
         except OSError:
             diagnostics.append({"source": source, "reason": "directory_unreadable"})
@@ -174,50 +226,154 @@ def discover(root, source, max_files, max_entries, counts, diagnostics):
     return found
 
 
+def probe_candidate(path, source, window):
+    """Read disjoint bounded file ends. Never emit source dialogue from inventory."""
+    entry = {"source": source, "path": str(path), "session_id": None, "cwd": None,
+             "date": None, "metadata_complete": False, "membership": "unknown"}
+    probe = {"complete_file": False, "bytes_read": 0, "ranges": [], "visible_messages": 0,
+             "in_window": 0, "outside_window": 0, "unknown": 0, "malformed": 0,
+             "unsupported": 0, "content_gaps": 0, "metadata_only": False, "unreadable": False}
+    entry["probe"] = probe
+    try:
+        safe_path(path)
+        with open_regular(path) as stream:
+            initial = os.fstat(stream.fileno())
+            head = stream.read(HEADER_BYTES)
+            segments = [(0, head, "head")]
+            tail_start = max(len(head), initial.st_size - HEADER_BYTES)
+            if tail_start < initial.st_size:
+                stream.seek(tail_start)
+                segments.append((tail_start, stream.read(HEADER_BYTES), "tail"))
+            final = os.fstat(stream.fileno())
+        for offset, data, kind in segments:
+            probe["ranges"].append({"start_byte": offset, "end_byte": offset + len(data), "kind": kind})
+            probe["bytes_read"] += len(data)
+        contiguous = len(segments) == 1 or segments[1][0] == len(head)
+        unchanged = (initial.st_size, initial.st_mtime_ns) == (final.st_size, final.st_mtime_ns)
+        probe["complete_file"] = contiguous and probe["bytes_read"] == initial.st_size and unchanged
+        if contiguous:
+            segments = [(0, b"".join(data for _, data, _ in segments), "head")]
+        turn_id = None
+        for offset, data, _ in segments:
+            if offset:
+                # The tail's first fragment has no proven physical line boundary.
+                split = data.find(b"\n")
+                probe["content_gaps"] += 1
+                data = data[split + 1:] if split >= 0 else b""
+                turn_id = None
+            rows = data.splitlines(keepends=True)
+            for index, raw in enumerate(rows, 1):
+                if not raw.endswith(b"\n") and not probe["complete_file"]:
+                    probe["content_gaps"] += 1
+                    continue
+                try:
+                    row = json.loads(raw)
+                except (ValueError, UnicodeError, RecursionError):
+                    probe["malformed"] += 1
+                    continue
+                if isinstance(row, dict):
+                    kind, value = row.get("type"), row.get("payload", {})
+                    if source == "codex" and kind == "session_meta" and isinstance(value, dict):
+                        if is_subagent(row):
+                            return None, "subagent"
+                        for output, field in (("session_id", "id"), ("cwd", "cwd"), ("date", "timestamp")):
+                            entry[output] = value.get(field) or entry[output]
+                        entry["session_id"] = value.get("session_id") or entry["session_id"]
+                    elif source == "claude" and kind in ("user", "assistant"):
+                        for output, field in (("session_id", "sessionId"), ("cwd", "cwd"), ("date", "timestamp")):
+                            entry[output] = entry[output] or row.get(field)
+                message, reason, turn_id = parse_record(row, source, path, index if not offset else 0, turn_id)
+                if message and any(part["type"] == "text" for part in message["parts"]):
+                    probe["visible_messages"] += 1
+                    probe[membership(message["timestamp"], window)] += 1
+                    if any(flag.startswith("unsupported") or flag == "attachment_omitted" for flag in message["context_flags"]):
+                        probe["content_gaps"] += 1
+                elif reason and reason.startswith("unsupported"):
+                    probe["unsupported"] += 1
+                elif message or reason in {"generated_summary", "item_completed_mirror", "subagent_context"}:
+                    probe["content_gaps"] += 1
+        for key in ("session_id", "cwd", "date"):
+            value = entry[key]
+            entry[key] = redact(value[:4096]) if isinstance(value, str) else None
+        entry["metadata_complete"] = all(entry[key] is not None for key in ("session_id", "cwd", "date"))
+        unresolved = any(probe[key] for key in ("unknown", "malformed", "unsupported", "content_gaps"))
+        probe["metadata_only"] = probe["complete_file"] and not probe["visible_messages"] and not unresolved
+        if probe["in_window"]:
+            entry["membership"] = "in_window"
+        elif probe["complete_file"] and not unresolved:
+            entry["membership"] = "outside_window"
+        return entry, None
+    except (OSError, ValueError):
+        probe["unreadable"] = True
+        return entry, "file_unreadable_or_unsafe"
+
+
 def inventory(args):
-    counts = {"entries": 0, "files": 0, "symlinks_skipped": 0, "headers_checked": 0, "excluded": 0}
-    diagnostics, candidates, files = [], [], []
+    window = frozen_window(args.since, args.until)
+    counts = {"entries": 0, "files": 0, "symlinks_skipped": 0, "probed": 0, "excluded": 0,
+              "in_window": 0, "outside_window": 0, "unknown": 0, "metadata_only": 0, "unreadable": 0}
+    diagnostics, by_source, files = [], {}, []
     for source in ("claude", "codex"):
         if args.source not in {source, "both"}:
             continue
         try:
             root = safe_path(getattr(args, source + "_root"), directory=True)
             source_counts = {"entries": 0, "files": 0, "symlinks_skipped": 0}
-            candidates.extend(discover(root, source, args.max_files, args.max_entries, source_counts, diagnostics))
+            by_source[source] = sorted(discover(root, source, args.max_files, args.max_entries, source_counts, diagnostics),
+                                       key=lambda row: (-row[0], str(row[1])))
             for key, value in source_counts.items():
                 counts[key] += value
         except (OSError, ValueError):
             diagnostics.append({"source": source, "reason": "root_unavailable_or_unsafe"})
-    # mtime chooses recent candidates; --since filters the observed session date, not mtime.
-    for _, path, source in sorted(candidates, key=lambda row: (-row[0], str(row[1]))):
-        try:
-            info, reason = metadata(path, source)
-            counts["headers_checked"] += 1
-            if info is None:
-                counts["excluded"] += 1
-                diagnostics.append({"source": source, "path": str(path), "reason": reason})
-                continue
-            if args.since:
-                try:
-                    date = dt.date.fromisoformat((info["date"] or "")[:10])
-                except ValueError:
-                    diagnostics.append({"source": source, "path": str(path), "reason": "date_unknown_since_filter"})
-                    continue
-                if date < args.since:
-                    continue
-            files.append(info)
-            if len(files) >= args.limit:
-                break
-        except (OSError, ValueError):
-            diagnostics.append({"source": source, "path": str(path), "reason": "file_unreadable_or_unsafe"})
+    candidates = []
+    for index in range(max((len(rows) for rows in by_source.values()), default=0)):
+        for source in ("claude", "codex"):
+            rows = by_source.get(source, [])
+            if index < len(rows):
+                candidates.append(rows[index])
+    fingerprint = hashlib.sha256()
+    for _, path, source, _ in candidates:
+        fingerprint.update(encode([source, str(path)]).encode("utf-8"))
+        fingerprint.update(b"\n")
+    snapshot = fingerprint.hexdigest()
+    if args.snapshot and args.snapshot != snapshot:
+        raise ValueError("discovery snapshot changed; restart inventory before continuing")
+    available = min(len(candidates), args.limit) if args.limit is not None else len(candidates)
+    stop = min(available, args.offset + args.page_size)
+    for _, path, source, _ in candidates[args.offset:stop]:
+        info, reason = probe_candidate(path, source, window)
+        counts["probed"] += 1
+        if reason:
+            diagnostics.append({"source": source, "path": str(path), "reason": reason})
+        if info is None:
+            counts["excluded"] += 1
+            continue
+        files.append(info)
+        counts[info["membership"]] += 1
+        for key in ("metadata_only", "unreadable"):
+            counts[key] += int(info["probe"][key])
+    continuation = None
+    if stop < available:
+        continuation = {"source": args.source, "since": window["start"], "until": window["end"],
+                        "page_size": args.page_size, "offset": stop, "snapshot": snapshot,
+                        "claude_root": args.claude_root, "codex_root": args.codex_root,
+                        "max_files": args.max_files, "max_entries": args.max_entries}
+        if args.limit is not None:
+            continuation["limit"] = args.limit
     # Diagnostics have a separate cap to avoid exposing an unbounded path listing.
     omitted = max(0, len(diagnostics) - 50)
     return {"version": 1, "command": "inventory", "files": files, "counts": counts,
-            "selection": "mtime_descending_within_bounded_scan", "limit": args.limit,
+            "window": window, "snapshot": snapshot, "continuation": continuation,
+            "page": {"offset": args.offset, "page_size": args.page_size, "total_candidates": len(candidates),
+                     "inspected_candidates": max(0, stop - args.offset)},
+            "selection": "interleaved_sources_mtime_descending_within_bounded_scan",
+            "sample": {"limit": args.limit, "capped": available < len(candidates)},
+            "coverage": {"discovery_complete": not diagnostics or all(d["reason"] in {"subagent", "file_unreadable_or_unsafe"} for d in diagnostics),
+                         "candidate_pages_complete": stop >= available},
             "diagnostics": diagnostics[:50], "diagnostics_omitted": omitted,
             "limits": {"max_files": args.max_files, "max_entries": args.max_entries,
                        "scan_limit_scope": "per_source",
-                       "header_bytes": HEADER_BYTES, "header_lines": HEADER_LINES},
+                       "head_bytes": HEADER_BYTES, "tail_bytes": HEADER_BYTES},
             "scope": "live_primary_sessions_only"}
 
 
@@ -329,7 +485,8 @@ def parse_record(record, source, path, line, turn_id):
         return None, "instruction_or_other_role", turn_id
     parts, flags = content_parts(content, allowed)
     if not parts:
-        return None, flags[0] if flags else "empty_message", turn_id
+        unsupported = next((flag for flag in flags if flag.startswith("unsupported")), None)
+        return None, unsupported or (flags[0] if flags else "empty_message"), turn_id
     timestamp = record.get("timestamp")
     if not isinstance(timestamp, str):
         timestamp = None
@@ -383,6 +540,7 @@ def add_gap(gaps, line, reason, **extra):
 
 def read_session(args):
     path = safe_path(args.file)
+    window = frozen_window(args.since, args.until) if args.since is not None or args.until is not None else None
     coverage = {"start_line": args.start_line, "end_line": args.start_line - 1,
                 "parsed": 0, "malformed": 0, "ignored": 0, "unsupported": 0,
                 "complete_file": False, "next_line": args.start_line, "bytes_read": 0}
@@ -392,6 +550,8 @@ def read_session(args):
                                                 "max_bytes": args.max_bytes, "max_line_bytes": LINE_BYTES,
                                                 "max_scan_lines": SCAN_LINES},
               "redaction": "best_effort_common_credentials_only"}
+    if window:
+        result["window"] = window
     messages, gaps, diagnostics = result["messages"], result["gaps"], result["diagnostics"]
     line_number, turn_id, subagent = 1, None, False
     if args.source == "codex":
@@ -454,6 +614,8 @@ def read_session(args):
                     valid = False
                 if valid:
                     message, reason, turn_id = parse_record(record, args.source, path, line_number, turn_id)
+                    if message and window:
+                        message["membership"] = membership(message["timestamp"], window)
                     if reason == "subagent_session":
                         subagent = True
                     if line_number >= args.start_line:
@@ -511,6 +673,11 @@ def read_session(args):
     if subagent:
         result["messages"] = []
         diagnostics.append("subagent_session_excluded")
+    if window:
+        coverage["window_messages"] = {key: sum(message["membership"] == key for message in result["messages"])
+                                       for key in ("in_window", "outside_window", "unknown")}
+        if result["continuation"]:
+            result["continuation"].update(since=window["start"], until=window["end"])
     # Budget is a serialized-character bound, including JSON escaping and metadata.
     if len(encode(result)) > args.max_chars:
         raise ValueError("metadata exceeds max-chars; increase the output budget")
@@ -528,9 +695,10 @@ def bounded_integer(low, high):
 
 def date_argument(value):
     try:
-        return dt.date.fromisoformat(value)
+        window_endpoint(value)
+        return value
     except ValueError as error:
-        raise argparse.ArgumentTypeError("expected YYYY-MM-DD") from error
+        raise argparse.ArgumentTypeError("expected YYYY-MM-DD or a timestamp with UTC offset") from error
 
 
 def parser():
@@ -539,7 +707,11 @@ def parser():
     inv = commands.add_parser("inventory", help="list live primary sessions without dialogue text")
     inv.add_argument("--source", choices=("both", "claude", "codex"), default="both")
     inv.add_argument("--since", type=date_argument)
-    inv.add_argument("--limit", type=bounded_integer(1, 100), default=10)
+    inv.add_argument("--until", type=date_argument)
+    inv.add_argument("--limit", type=bounded_integer(1, 100_000), help="explicit candidate sample cap; no default cap")
+    inv.add_argument("--page-size", type=bounded_integer(1, 100), default=25)
+    inv.add_argument("--offset", type=bounded_integer(0, 100_000), default=0)
+    inv.add_argument("--snapshot", help="fingerprint returned by the previous inventory page")
     inv.add_argument("--claude-root", default=str(Path.home() / ".claude"))
     inv.add_argument("--codex-root", default=os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"))
     inv.add_argument("--max-files", type=bounded_integer(1, 10_000), default=2000)
@@ -547,6 +719,8 @@ def parser():
     read = commands.add_parser("read", help="read a bounded JSONL window with local citations")
     read.add_argument("--source", choices=("claude", "codex"), required=True)
     read.add_argument("--file", required=True)
+    read.add_argument("--since", type=date_argument)
+    read.add_argument("--until", type=date_argument)
     read.add_argument("--start-line", type=bounded_integer(1, 1_000_000_000), default=1)
     read.add_argument("--start-byte", type=bounded_integer(0, 1_000_000_000_000), default=0,
                       help="use only the exact byte offset returned in continuation")

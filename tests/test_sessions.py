@@ -1,5 +1,6 @@
 """Synthetic sessions only. No tests read the user's session directories."""
 import contextlib
+import datetime as dt
 import importlib.util
 import io
 import json
@@ -62,6 +63,7 @@ class CollectorTests(unittest.TestCase):
         return sessions.read_session(sessions.parser().parse_args(argv))
 
     def inventory(self, **options):
+        options = {"since": "2025-01-01", "until": "2027-01-01", **options}
         argv = ["inventory", "--claude-root", str(self.root / "claude"),
                 "--codex-root", str(self.root / "codex")]
         for key, value in options.items():
@@ -315,20 +317,20 @@ class CollectorTests(unittest.TestCase):
         self.write("codex/archived_sessions/archive.jsonl", [meta()])
         os.utime(root, (10, 10))
         os.utime(primary, (20, 20))
-        result = self.inventory(limit=2)
-        self.assertEqual([f["source"] for f in result["files"]], ["codex", "claude"])
+        result = self.inventory()
+        self.assertEqual([f["source"] for f in result["files"]], ["claude", "codex"])
         self.assertNotIn("private", sessions.encode(result["files"]).replace(str(self.root), ""))
         self.assertEqual(len(self.inventory(limit=1)["files"]), 1)
-        self.assertEqual(result["files"][0]["session_id"], "synthetic-codex")
+        self.assertEqual(result["files"][1]["session_id"], "synthetic-codex")
 
-    def test_since_uses_observed_session_date_and_reports_unknown_date(self):
+    def test_window_uses_dialogue_timestamps_and_keeps_unknown_candidates(self):
         self.write("claude/projects/p/a.jsonl", [claude("older", timestamp="2025-01-01T00:00:00Z")])
         self.write("claude/projects/p/b.jsonl", [claude("newer", timestamp="2026-01-02T00:00:00Z")])
         self.write("claude/projects/p/c.jsonl", [claude("unknown", timestamp=None)])
         result = self.inventory(source="claude", since="2026-01-01")
-        self.assertEqual(len(result["files"]), 1)
-        self.assertEqual(Path(result["files"][0]["path"]).name, "b.jsonl")
-        self.assertTrue(any(d["reason"] == "date_unknown_since_filter" for d in result["diagnostics"]))
+        self.assertEqual(len(result["files"]), 3)
+        self.assertEqual({Path(f["path"]).name: f["membership"] for f in result["files"]},
+                         {"a.jsonl": "outside_window", "b.jsonl": "in_window", "c.jsonl": "unknown"})
 
     def test_inventory_newest_codex_dates_first_and_per_source_budgets(self):
         self.write("claude/projects/p/a.jsonl", [claude("one")])
@@ -358,10 +360,183 @@ class CollectorTests(unittest.TestCase):
     def test_header_limit_unsupported_schema_does_not_load_whole_file(self):
         path = self.write("codex/sessions/2026/01/01/unknown.jsonl", [{"type": "unknown", "text": "A" * 100000}])
         result = self.inventory(source="codex")
-        self.assertEqual(result["files"], [])
-        self.assertEqual(result["counts"]["headers_checked"], 1)
-        self.assertEqual(result["diagnostics"][0]["reason"], "unsupported_or_header_limit")
+        self.assertEqual(result["files"][0]["membership"], "unknown")
+        self.assertEqual(result["counts"]["probed"], 1)
+        self.assertEqual(result["files"][0]["probe"]["unsupported"], 1)
         self.assertTrue(path.exists())
+
+    def test_default_window_clamps_three_calendar_months_and_preserves_time(self):
+        now = dt.datetime(2026, 5, 31, 12, 34, 56, 123456, tzinfo=dt.timezone.utc)
+        with patch.object(sessions, "utc_now", return_value=now):
+            result = sessions.frozen_window()
+        self.assertEqual(result["start"], "2026-02-28T12:34:56.123456Z")
+        self.assertEqual(result["end"], "2026-05-31T12:34:56.123456Z")
+        leap = sessions.frozen_window(until="2024-05-31T12:00:00Z")
+        self.assertEqual(leap["start"], "2024-02-29T12:00:00.000000Z")
+        year = sessions.frozen_window(until="2026-01-31T12:00:00Z")
+        self.assertEqual(year["start"], "2025-10-31T12:00:00.000000Z")
+
+    def test_window_dates_offsets_inclusive_edges_and_invalid_input(self):
+        window = sessions.frozen_window("2026-01-02", "2026-01-02")
+        self.assertEqual(window["start"], "2026-01-02T00:00:00.000000Z")
+        self.assertEqual(window["end"], "2026-01-02T23:59:59.999999Z")
+        for value in (window["start"], window["end"], "2026-01-02T05:30:00+05:30"):
+            self.assertEqual(sessions.membership(value, window), "in_window")
+        self.assertEqual(sessions.membership("2026-01-03T00:00:00Z", window), "outside_window")
+        for value in (None, "2026-01-02", "2026-01-02T12:00:00", "invalid"):
+            self.assertEqual(sessions.membership(value, window), "unknown")
+        with self.assertRaises(ValueError):
+            sessions.frozen_window("2026-01-03", "2026-01-02")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            sessions.parser().parse_args(["inventory", "--since", "2026-01-02T12:00:00"])
+
+    def test_old_codex_session_resumed_in_window_is_retained(self):
+        self.write("codex/sessions/2020/01/01/old-name.jsonl", [meta(timestamp="2020-01-01T00:00:00Z"),
+            {**codex("old context"), "timestamp": "2020-01-01T00:00:00Z"}, codex("resumed")])
+        result = self.inventory(source="codex", since="2026-01-01", until="2026-01-03")
+        self.assertEqual(result["files"][0]["membership"], "in_window")
+        self.assertEqual(result["files"][0]["date"], "2020-01-01T00:00:00Z")
+        self.assertEqual(result["files"][0]["probe"]["in_window"], 1)
+
+    def test_recent_mtime_does_not_make_old_dialogue_in_window(self):
+        path = self.write("claude/projects/p/old.jsonl", [claude("old", timestamp="2020-01-01T00:00:00Z")])
+        os.utime(path, (2_000_000_000, 2_000_000_000))
+        result = self.inventory(source="claude", since="2026-01-01", until="2026-01-03")
+        self.assertEqual(result["files"][0]["membership"], "outside_window")
+
+    def test_large_file_middle_is_unknown_but_resumed_tail_proves_membership(self):
+        padding = {"type": "system", "content": "X" * 150000}
+        path = self.write("claude/projects/p/large.jsonl", [claude("old", timestamp="2020-01-01T00:00:00Z"),
+                                                           padding, claude("resumed")])
+        result = self.inventory(source="claude", since="2026-01-01", until="2026-01-03")
+        entry = result["files"][0]
+        self.assertEqual(entry["membership"], "in_window")
+        self.assertFalse(entry["probe"]["complete_file"])
+        self.assertLessEqual(entry["probe"]["bytes_read"], 2 * sessions.HEADER_BYTES)
+        self.assertLessEqual(entry["probe"]["ranges"][0]["end_byte"], entry["probe"]["ranges"][1]["start_byte"])
+        self.write("claude/projects/p/large.jsonl", [claude("old", timestamp="2020-01-01T00:00:00Z"), padding,
+                                                    claude("also old", timestamp="2020-01-02T00:00:00Z")])
+        result = self.inventory(source="claude", since="2026-01-01", until="2026-01-03")
+        self.assertEqual(result["files"][0]["membership"], "unknown")
+        self.assertTrue(path.exists())
+
+    def test_contiguous_head_tail_are_parsed_without_duplicate_or_partial_records(self):
+        rows = [claude("X" * 1000, uuid=str(i)) for i in range(80)]
+        self.write("claude/projects/p/medium.jsonl", rows)
+        result = self.inventory(source="claude")
+        probe = result["files"][0]["probe"]
+        self.assertTrue(probe["complete_file"])
+        self.assertEqual(probe["visible_messages"], 80)
+        self.assertEqual(probe["content_gaps"], 0)
+        self.assertEqual(len(probe["ranges"]), 2)
+        self.assertEqual(probe["ranges"][0]["end_byte"], probe["ranges"][1]["start_byte"])
+
+    def test_malformed_undated_and_unknown_content_keep_membership_unknown(self):
+        self.write("claude/projects/p/undated.jsonl", [claude("date unknown", timestamp="2026-01-02T12:00:00")])
+        self.write("claude/projects/p/unsupported.jsonl", [claude([{"type": "future", "data": "unknown"}, {"type": "tool_use"}])])
+        malformed = self.write("claude/projects/p/malformed.jsonl", [claude("old", timestamp="2020-01-01T00:00:00Z")])
+        with malformed.open("ab") as stream:
+            stream.write(b"{truncated")
+        result = self.inventory(source="claude", since="2026-01-01", until="2026-01-03")
+        self.assertEqual([entry["membership"] for entry in result["files"]], ["unknown"] * 3)
+
+    def test_metadata_only_is_distinct_from_unreadable_candidate(self):
+        path = self.write("codex/sessions/2026/01/02/metadata.jsonl", [meta()])
+        window = sessions.frozen_window("2026-01-01", "2026-01-03")
+        entry, reason = sessions.probe_candidate(path, "codex", window)
+        self.assertIsNone(reason)
+        self.assertTrue(entry["probe"]["metadata_only"])
+        self.assertEqual(entry["probe"]["visible_messages"], 0)
+        self.assertEqual(entry["membership"], "outside_window")
+        with patch.object(sessions, "open_regular", side_effect=PermissionError("synthetic denied")):
+            entry, reason = sessions.probe_candidate(path, "codex", window)
+        self.assertEqual(reason, "file_unreadable_or_unsafe")
+        self.assertEqual(entry["membership"], "unknown")
+        self.assertFalse(entry["probe"]["metadata_only"])
+        self.assertTrue(entry["probe"]["unreadable"])
+
+    def test_default_inventory_has_no_ten_file_cap_and_probes_only_page(self):
+        for index in range(30):
+            self.write(f"claude/projects/p/{index}.jsonl", [claude(str(index))])
+        with patch.object(sessions, "probe_candidate", wraps=sessions.probe_candidate) as probe:
+            result = self.inventory(source="claude")
+        self.assertEqual(len(result["files"]), 25)
+        self.assertEqual(probe.call_count, 25)
+        self.assertIsNone(result["sample"]["limit"])
+        self.assertIsNotNone(result["continuation"])
+        self.assertEqual(result["page"]["total_candidates"], 30)
+
+    def test_candidate_pages_interleave_unequal_sources_without_missing_or_duplicate_files(self):
+        for index in range(11):
+            self.write(f"claude/projects/p/{index}.jsonl", [claude(str(index))])
+        for index in range(3):
+            self.write(f"codex/sessions/2026/01/02/{index}.jsonl", [meta(), codex(str(index))])
+        result = self.inventory(page_size=2)
+        self.assertEqual([entry["source"] for entry in result["files"]], ["claude", "codex"])
+        paths = [entry["path"] for entry in result["files"]]
+        frozen = result["window"]
+        while result["continuation"]:
+            result = self.inventory(**result["continuation"])
+            self.assertEqual(result["window"], frozen)
+            paths.extend(entry["path"] for entry in result["files"])
+        self.assertEqual(len(paths), 14)
+        self.assertEqual(len(set(paths)), 14)
+
+    def test_explicit_sample_limit_caps_candidates_not_matching_dialogue(self):
+        for index in range(5):
+            self.write(f"codex/sessions/2026/01/02/{index}.jsonl", [meta()])
+        result = self.inventory(source="codex", limit=3, page_size=2)
+        self.assertTrue(result["sample"]["capped"])
+        self.assertEqual(result["counts"]["in_window"], 0)
+        final = self.inventory(**result["continuation"])
+        self.assertEqual(len(result["files"]) + len(final["files"]), 3)
+        self.assertIsNone(final["continuation"])
+
+    def test_discovery_fingerprint_allows_append_when_order_unchanged(self):
+        first = self.write("claude/projects/p/first.jsonl", [claude("first")])
+        second = self.write("claude/projects/p/second.jsonl", [claude("second")])
+        os.utime(first, ns=(100, 100))
+        os.utime(second, ns=(200, 200))
+        result = self.inventory(source="claude", page_size=1)
+        with second.open("a") as stream:
+            stream.write(json.dumps(claude("appended")) + "\n")
+        final = self.inventory(**result["continuation"])
+        self.assertEqual(final["snapshot"], result["snapshot"])
+        self.assertEqual(Path(final["files"][0]["path"]).name, "first.jsonl")
+
+    def test_discovery_fingerprint_rejects_insertions_and_reordering(self):
+        first = self.write("claude/projects/p/first.jsonl", [claude("first")])
+        second = self.write("claude/projects/p/second.jsonl", [claude("second")])
+        os.utime(first, ns=(100, 100))
+        os.utime(second, ns=(200, 200))
+        result = self.inventory(source="claude", page_size=1)
+        os.utime(first, ns=(300, 300))
+        with self.assertRaisesRegex(ValueError, "discovery snapshot changed"):
+            self.inventory(**result["continuation"])
+        result = self.inventory(source="claude", page_size=1)
+        self.write("claude/projects/p/new.jsonl", [claude("new")])
+        with self.assertRaisesRegex(ValueError, "discovery snapshot changed"):
+            self.inventory(**result["continuation"])
+
+    def test_scan_limit_remains_incomplete_when_candidate_pages_end(self):
+        for index in range(3):
+            self.write(f"claude/projects/p/{index}.jsonl", [claude(str(index))])
+        result = self.inventory(source="claude", max_files=1)
+        self.assertIsNone(result["continuation"])
+        self.assertTrue(result["coverage"]["candidate_pages_complete"])
+        self.assertFalse(result["coverage"]["discovery_complete"])
+
+    def test_read_window_annotates_messages_preserves_context_and_freezes_continuation(self):
+        path = self.write("session.jsonl", [claude("earlier context", timestamp="2020-01-01T00:00:00Z"),
+                                           claude("in window"), claude("undated", timestamp=None)])
+        first = self.read_path(path, since="2026-01-01", until="2026-01-03", max_lines=2)
+        self.assertEqual([m["text"] for m in first["messages"]], ["earlier context", "in window"])
+        self.assertEqual([m["membership"] for m in first["messages"]], ["outside_window", "in_window"])
+        self.assertEqual(first["coverage"]["window_messages"], {"in_window": 1, "outside_window": 1, "unknown": 0})
+        final = self.read_path(path, **first["continuation"])
+        self.assertEqual(final["window"], first["window"])
+        self.assertEqual(final["messages"][0]["membership"], "unknown")
+        self.assertFalse(final["coverage"]["complete_file"])
 
     def test_cli_stdout_only_no_generated_exports(self):
         path = self.write("session.jsonl", [claude("visible")])

@@ -2,25 +2,18 @@
 
 **Stop asking your coding assistant to explain its explanation.**
 
-An AI answer can contain a wall of text and still miss the question you asked.
-Sometimes the assistant uses unfamiliar terms. Sometimes it keeps explaining a cause that does not match what you reported.
+An AI answer can contain a wall of text and still miss your question.
+The assistant might claim a fix before checking your browser.
+It might give an unfamiliar term instead of a useful next step.
 
-Clear Conversations reviews those exchanges and proposes better explanations and small instruction changes.
+Clear Conversations reviews your saved chats and proposes clearer explanations and small instruction changes.
 It is a **skill**: reusable instructions that your coding assistant follows when you invoke it.
 The same skill works in Claude Code and Codex.
 
 ## Install
 
-You need Git, access to your locally saved conversations, and Python 3.10 or later.
-The included session reader uses Python's standard library. No Python packages are required.
-
-Check your Python version:
-
-```sh
-python3 --version
-```
-
-If your default Python is older, use an available interpreter such as `python3.11` for the reader and tests.
+Use the Git commands below to install the skill. **Python is not required to install or use it.**
+Your coding assistant chooses available tools to read your saved conversations.
 
 ### Claude Code
 
@@ -38,7 +31,24 @@ git clone https://github.com/kirthi35/clear-conversations.git ~/.agents/skills/c
 
 If the skill does not appear, restart your coding assistant.
 
-## Run one command
+## From a saved chat to a useful rule
+
+The sequence below is illustrative. The messages and outcomes are synthetic, rather than private conversation excerpts or verified runtime findings.
+
+### 1. A previous chat left a gap
+
+> **You:** The Save button shows an error. Please check why.
+>
+> **Assistant:** The terminal check passed. The issue is fixed now.
+>
+> **You:** I clicked Save in the browser again. It still shows an error.
+
+The transcript reports one successful check and a continuing browser error.
+It does not show a successful check of the Save button.
+In a second invented chat, the assistant makes the same claim about a CSV export after checking only the server.
+The user reports that the browser still exports an empty file.
+
+### 2. Run one command
 
 In Claude Code, enter:
 
@@ -46,125 +56,114 @@ In Claude Code, enter:
 /clear-conversations
 ```
 
-In Codex, the same invocation uses `$clear-conversations`.
+In Codex, use `$clear-conversations`.
 No extra prompt is required.
 
-The assistant then:
+The assistant reviews saved main conversations active during the last **three calendar months**, across both sources.
+The interval runs from today's date back three months. The report prints the exact dates.
+Older conversations resumed during that interval are included.
 
-1. Finds your latest 10 available saved conversations across Claude Code and Codex.
-2. Reads the relevant exchanges, including your corrections and the assistant's recovery.
-3. Returns supported findings, clearer rewrites, and a small proposed instruction.
-4. Shows the instruction and target file before asking whether to save it.
+The assistant reads relevant exchanges, checks corrections and recovery, and returns a short report.
+If one source is unavailable, the review uses the other and states the limitation.
 
-Either assistant can review both sources when local permissions allow access.
-If one source is missing, the review uses the other.
-If neither source is available, the assistant explains the next useful collection step.
+### 3. Read the clear report
 
-The default review uses main conversations, rather than separate subagent conversations.
-The assistant also honors a narrower scope when you explicitly provide one.
+An illustrative report could say:
 
-## What the result looks like
-
-These examples are illustrative. They are invented scenarios, not excerpts from private conversations or verified runtime findings.
-
-### Problem: the explanation does not match the reported failure
-
-**Illustrative exchange**
-
-> **Assistant:** A chat session expires after 60 minutes. That explains why the chat stopped working.
+> **Change to try:** Separate what passed from what the user still reports as failing.
 >
-> **User:** But this is a new chat. It fails after three minutes.
+> The transcript reports a successful terminal check and a continuing browser error.
+> It does not establish that the Save button was fixed.
+>
+> | Review summary | Count |
+> | --- | ---: |
+> | Synthetic sessions reviewed | 2 |
+> | Messages examined | 17 |
+> | Supported issues in the complete example | 2 |
+> | Issues repeated in separate chats | 1 |
+>
+> **What kept happening**
+>
+> | Repeated problem | How often | Better response |
+> | --- | --- | --- |
+> | The assistant said “fixed”, but the browser action still failed. | 2 separate episodes in 2 reviewed chats | Say what passed, what remains untested, and what happens next. |
+>
+> **Proposed rewrite:** “The terminal check passed, but we have not verified Save in your browser. The cause remains unknown.”
+>
+> **What worked:** Later, the assistant gave one browser action at a time. The user followed the steps and restated the verification gap.
+>
+> **Proposed rule:** “State what was tested and what remains unverified before claiming that a problem is fixed.”
 
-**Review**
+A real report supplies source references and evidence notes below the main explanation.
+It distinguishes files found from conversations actually read.
+The [complete synthetic report](examples/report.md) cites both invented sources: the [Save chat](examples/synthetic-session.jsonl) and the [export chat](examples/synthetic-session-2.jsonl).
 
-**Classification:** Unresolved technical mismatch.
-The 60-minute limit does not explain the reported three-minute failure by itself.
-The cause remains unknown. A clearer explanation must expose that mismatch before proposing another cause.
-The mismatch alone does not prove a communication failure.
+### 4. Save a rule only if you accept it
 
-**Proposed rewrite**
+The assistant shows the proposed wording and the selected instruction file before asking to save a new rule.
+For example, an approved rule could become an instruction in your project's `AGENTS.md` or `CLAUDE.md`.
 
-> The 60-minute expiry does not explain a new chat failing after three minutes by itself.
-> We have not identified the cause of this earlier failure.
-> We need evidence from the failed request before choosing another explanation.
+The saved rule guides future assistant behavior. It does not repair the current browser failure.
+The assistant preserves unrelated instructions and shows the resulting change.
+If you already requested a specific edit, the assistant uses that authorization.
 
-**Proposed instruction**
+## What the review covers
 
-> When a reported observation conflicts with your explanation, state the mismatch first.
-> Keep the cause unresolved until evidence identifies it.
+The default period is three calendar months, rather than an arbitrary number of recent files.
+The assistant checks both sources in batches and reviews available candidates with relevant or unresolved activity dates.
+Confirmed files outside the interval can be excluded.
+A newer Claude Code chat does not displace an eligible Codex chat, or the reverse.
 
-For a project that uses `AGENTS.md`, the assistant could propose this diff after inspecting that file:
+A file list is not a completed review.
+The report separates files found, dialogue sessions read, automated or empty files, and sampled exchanges.
+If a reading or discovery limit prevents complete coverage, the report says that the review is partial.
 
-```diff
-+ When a reported observation conflicts with your explanation, state the mismatch first.
-+ Keep the cause unresolved until evidence identifies it.
-```
-
-The review shows the target file and proposed change for your decision.
-It does not silently save the rule.
-
-### Problem: internal terms hide the user's flow
-
-**Illustrative scenario:** A task status changes on the page only after the user reloads it.
-
-**Before**
-
-> The materialized projection requires client reconciliation after the asynchronous lifecycle transition.
-
-**Review**
-
-**Classification:** Communication gap in the wording; technical flow unverified.
-The response names internal mechanisms before identifying what the worker and browser do.
-The rewrite below is suitable only if the implementation evidence supports that flow.
-
-**Proposed rewrite**
-
-> The worker saves the new task status. The browser receives no live update.
-> Reloading makes the browser request the saved status.
-
-**Proposed instruction**
-
-> Explain the user's action and data flow before naming internal mechanisms.
-
-Read the [complete illustrative report](examples/report.md) and its [synthetic source](examples/synthetic-session.jsonl).
-A real review cites source files and lines, includes useful excerpts, and preserves uncertainty.
-It also identifies successful explanations when the evidence supports them.
-
-## What the review checks
-
-The assistant separates communication problems from technical errors, scope disagreements, and unresolved cases.
+The assistant separates communication problems, technical errors, scope disagreements, and unresolved cases.
 Your confusion alone does not prove that an explanation failed.
-The assistant reads the whole relevant exchange and checks whether a correction or clearer explanation resolved the misunderstanding.
+The report contains up to three supported issues, a useful rewrite, successful patterns, and small proposed rules.
+The report starts with a numeric summary. Tables show source coverage and pair problems with suggested changes when useful.
+Counts describe the reviewed evidence. Unknown counts remain unknown, and sampled results include their denominators.
+“What kept happening” groups repeated problems and shows separate occurrences, affected sessions, and their effect on the user.
+Repeated questions within one unresolved task do not automatically count as separate failures.
+Copied exchanges and earlier reviews do not create new occurrences. Single incidents remain separate from recurring problems.
+Its main explanation aims for approximately 300–500 words total and can be shorter.
+Detailed evidence remains available below it.
 
-The report contains up to three prioritized findings. It does not invent findings to fill that limit.
-Suggested rules address the supported problem, rather than imposing a permanent preference from one incident.
+Reports use ASD-STE100 writing principles: short sentences, explicit actors, consistent terms, and concrete context before diagrams.
+This project does not claim formal compliance, certification, measured time savings, or a numeric clarity score.
 
-Reports follow ASD-STE100 writing principles: short sentences, explicit actors, consistent terms, and concrete context before diagrams.
-This project does not claim formal compliance, certification, or measured time savings.
+## How sessions are read
 
-## Privacy and limits
+Claude Code or Codex chooses suitable tools in its environment: native file tools, available commands, or the optional bundled reader.
+A missing Python installation or a broken shell does not block the review when other permitted tools can read the sessions.
+The assistant reports any material it could not read.
 
-The session reader accesses local files, writes JSON to standard output, and makes no network requests.
-Your coding assistant may send that material to its provider under the assistant's settings and policies.
-Local extraction does not mean that the complete review stays on your device.
+The optional [session reader](references/collector.md) handles date selection, bounded reads, duplicate records, and basic credential redaction.
+Only this helper requires Python 3.10 or later. It uses the standard library and needs no additional Python packages.
 
-Redaction is best effort. It cannot guarantee removal of credentials, personal data, or business secrets.
-Keep private transcripts and reports out of public issues and pull requests.
+## Your sessions and reports
+
+The review runs through your coding assistant and its configured model. This skill adds no separate upload service.
+Your review request authorizes reading the selected sessions with the assistant's permitted tools.
+Useful names and technical details stay in the explanation. Passwords and tokens need not be repeated to explain a communication problem.
+The assistant does not require a separate redaction step or another approval before reading authorized sessions.
+
+Reports stay in the conversation unless you request a file or another destination.
+Public examples use synthetic material or specifically approved excerpts.
 
 The review covers available retained records, not your complete conversation history.
-The reader sorts discovered files by modification time, within bounded scans.
-If a scan limit applies, the selected files are the latest discovered conversations, not necessarily the latest overall.
-The assistant discloses missing context, unread ranges, and other evidence limits.
+The assistant discloses missing sources, uncertain dates, unread ranges, and other evidence limits.
+Without tool evidence, the report describes what the transcript says and preserves uncertainty about the runtime.
 
 A review does not automatically edit `CLAUDE.md`, `AGENTS.md`, or memory.
 An explicit save request authorizes only the accepted change to the selected file.
-Later comparisons can check the behavior again, but cannot establish causation from an instruction change alone.
+Later comparisons can check behavior again, but cannot establish causation from an instruction change alone.
 
-See [session reader commands and limits](references/collector.md) for collection details.
+See [optional reader commands and limits](references/collector.md) when using the bundled helper.
 
 ## Development
 
-Run tests from the repository root with Python 3.10 or later:
+To develop or test the optional Python reader, use Python 3.10 or later:
 
 ```sh
 python3 -m unittest discover -s tests -v

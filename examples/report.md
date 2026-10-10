@@ -1,51 +1,66 @@
-# Synthetic conversation review
+# Illustrative review
 
-The assistant's concrete explanation resolved an identified misunderstanding in this synthetic session.
-The first response introduced an undefined mechanism before explaining the browser's behavior.
+This report and both sources are synthetic. All dates, actions, and messages were invented for the example.
 
-## Scope
+## Summary
 
-I reviewed all eight records in [synthetic-session.jsonl](synthetic-session.jsonl).
-This example contains one invented Claude Code exchange. It does not represent a real user's history.
-The source contains no runtime inspection or tool results.
+The same problem occurred in two separate chats: the assistant said “fixed”, but the user's browser still failed.
+One chat concerned Save. The other concerned a CSV export.
+Both assistants later acknowledged that their earlier checks had not verified the browser action.
 
-## Finding: explain the browser's action first
+**Illustrative period:** 2026-07-10 through 2026-10-10.
 
-**Classification:** Communication. **Confidence:** Supported within this exchange.
+| Review summary | Count |
+| --- | ---: |
+| Session files supplied and fully reviewed | 2 |
+| Dialogue messages examined | 17 |
+| Distinct supported issues | 2 |
+| Issues repeated in separate chats | 1 |
+| Successful patterns identified | 1 |
 
-The user wanted to understand why a reload changed the displayed task status.
-The assistant first described “client reconciliation” without defining the term or identifying the browser's action.
-The user then asked which part needed the reload.
+Both supplied sessions are from Claude Code. No Codex records were supplied.
+No exchanges were sampled, and no sessions remain partly read. No automated or empty files were supplied.
+These fixtures illustrate the report format, rather than a real three-month review.
 
-**Source:** `synthetic-session.jsonl:1–5`.
+## What kept happening
 
-**Before — exact source excerpt, line 2:**
+| Repeated problem | Separate episodes | Effect on the user | Change to try |
+| --- | --- | --- | --- |
+| “Fixed” did not mean the browser action had passed. | 2 episodes in both reviewed sessions. E1 | The user repeated the failed action. | Say what passed and what remains untested. |
 
-> The materialized projection requires client reconciliation after the asynchronous lifecycle transition.
+**One additional incident:** “Persistence layer” did not tell the user what to do. Explain unfamiliar terms and give a concrete action. E2
 
-**After — proposed rewrite using the explanation in line 4:**
+**Before — exact assistant response:**
 
-> The worker saves the new task status. The browser receives no live update. Reloading makes the browser request the saved status.
+> The terminal check passed. The issue is fixed now.
 
-**Observed result:** At line 5, the user restated the worker's save action and the browser's read action correctly.
+**After — proposed rewrite:**
 
-**Alternative explanation:** The assistant might have described the runtime incorrectly. The retained record cannot establish technical accuracy.
+> The terminal check passed, but we have not verified the Save button in your browser.
+> Your browser still reports an error. The cause remains unknown.
+> Next, click Save once and tell me the exact message.
 
-**Recommendation:** Explain the user's action and data flow before naming internal mechanisms.
-This instruction addresses the observed omission. It does not require diagrams for every response.
+The rewrite preserves the reported test result and identifies the next check.
 
-## Successful pattern
+## What worked
 
-At lines 6–8, the assistant defined “live update” and identified the server and browser.
-The user then restated the proposed behavior accurately.
-Keep this pattern: define the unfamiliar term, identify each actor, and state the visible result.
+The assistant later asked the user to open the page, then click Save and report the message.
+The user followed those steps and correctly restated the verification gap. E3 supports this successful pattern.
+The record does not show that the runtime problem was repaired.
 
-## Evidence limits and next step
+## Proposed rules
 
-One incident does not establish a repeated pattern or a permanent user preference.
-The record supports a communication finding, but it does not verify the worker or browser implementation.
-No instruction file changed during this review.
+> State what was tested and what remains unverified before claiming that a problem is fixed.
+>
+> When the user requests a manual check, give one concrete action at a time.
 
-If the user accepts the recommendation, apply it only to the requested instruction file.
-After relevant later sessions exist, compare whether the assistant explains actions before internal mechanisms.
-Do not infer improvement from sessions that contain no comparable explanation.
+These rules would guide future responses. They would not repair either browser failure.
+No instruction file changed. The target remains unspecified.
+
+## Evidence notes
+
+- **E1 — communication; technical causes unresolved:** Two distinct episodes support this pattern. Save: [synthetic-session.jsonl](synthetic-session.jsonl), lines 1–3 and 6, session `synthetic-example`. Export: [synthetic-session-2.jsonl](synthetic-session-2.jsonl), lines 1–4, session `synthetic-export-example`. Each transcript reports a successful nonbrowser check and a continuing browser failure. Tool evidence is unavailable. Later follow-ups belong to these same episodes; they are not extra occurrences.
+- **E2 — communication:** First source, lines 4–5. The assistant introduced “persistence layer” without defining it or answering the requested next action. This occurred once in the supplied evidence.
+- **E3 — successful recovery:** First source, lines 6–11. The user performed the requested actions and accurately restated the difference between the tested paths.
+
+These invented sessions demonstrate counting within an example. They do not establish a real user's behavior, permanent preferences, or technical causes.
